@@ -1,0 +1,83 @@
+name: run
+run-name: run
+# Manual trigger only, owner only. Sources, intermediate binaries, logs and results are all encrypted;
+# nothing readable is printed to the (public) log.
+on:
+  workflow_dispatch:
+    inputs:
+      seeds:
+        default: "[130,131,132]"
+        required: true
+      codes:
+        default: "[1,2,3,4]"
+        required: true
+      dev_env:
+        default: ""
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: tools
+        run: |
+          sudo apt-get update -qq > /dev/null
+          sudo apt-get install -y -qq --no-install-recommends cmake ninja-build g++ libeigen3-dev > /dev/null
+      - name: build
+        env:
+          KEY: ${{ secrets.PAYLOAD_KEY }}
+        run: |
+          bash .github/crypt.sh dec payload.gpg bundle.tgz
+          mkdir w && tar -xzf bundle.tgz && tar -xzf payload.tar.gz -C w && rm -f bundle.tgz payload.tar.gz
+          (cd w && bash scripts/navsim/build.sh ../o)
+          tar -C o -czf o.tgz . && bash .github/crypt.sh enc o.tgz b.gpg
+          echo done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b
+          path: b.gpg
+          retention-days: 2
+
+  fly:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        code: ${{ fromJSON(inputs.codes) }}
+        seed: ${{ fromJSON(inputs.seeds) }}
+    name: job ${{ strategy.job-index }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: b
+      - name: run
+        env:
+          KEY: ${{ secrets.PAYLOAD_KEY }}
+          DEV_ENV: ${{ inputs.dev_env }}
+          CODE: ${{ matrix.code }}
+          SEED: ${{ matrix.seed }}
+        run: |
+          bash .github/crypt.sh dec payload.gpg bundle.tgz
+          mkdir w && tar -xzf bundle.tgz && tar -xzf payload.tar.gz -C w && rm -f bundle.tgz payload.tar.gz
+          bash .github/crypt.sh dec b.gpg o.tgz && mkdir o && tar -xzf o.tgz -C o
+          (cd w && bash scripts/navsim/fly.sh "$CODE" "$SEED" ../o/bins ../r)
+          cp o/build.log r/ 2>/dev/null || true
+          tar -C r -czf r.tgz . && bash .github/crypt.sh enc r.tgz r.gpg
+          echo done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r-${{ strategy.job-index }}
+          path: r.gpg
+          retention-days: 30
